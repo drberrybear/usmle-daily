@@ -149,6 +149,79 @@ input[type=text]{background:var(--surface);border:1px solid var(--line);border-r
 </style>
 
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+// Standalone (GitHub Pages) only: Google sign-in + Firestore, exposed through the same
+// claude.use("db"/"user") interface the app uses inside claude.ai.
+(function(){
+  if(!window.firebase)return;
+  try{
+    firebase.initializeApp({
+      apiKey:"AIzaSyBjmMwS5hX2orDzlTScL39WqTwaGH2C4Kk",
+      authDomain:"usmle-daily.firebaseapp.com",
+      projectId:"usmle-daily",
+      storageBucket:"usmle-daily.firebasestorage.app",
+      messagingSenderId:"1008079184207",
+      appId:"1:1008079184207:web:f74b6e53ddaa388fb3e53a"
+    });
+  }catch(e){console.warn("firebase init failed",e);return}
+  const auth=firebase.auth(), fs=firebase.firestore();
+
+  let first=true, resolveReady;
+  const ready=new Promise(r=>{resolveReady=r});
+  const A=window.__auth={user:null,error:"",
+    async signIn(){
+      A.error="";
+      const p=new firebase.auth.GoogleAuthProvider();
+      try{await auth.signInWithPopup(p)}
+      catch(e){
+        if(e&&(e.code==="auth/popup-blocked"||e.code==="auth/operation-not-supported-in-this-environment")){await auth.signInWithRedirect(p);return}
+        if(e&&e.code==="auth/popup-closed-by-user")return;
+        A.error=e&&e.code==="auth/unauthorized-domain"?"이 주소가 Firebase 승인된 도메인에 없어요.":"로그인에 실패했어요. 다시 시도해 주세요.";
+        if(window.render)window.render();
+      }
+    },
+    signOut(){auth.signOut()}
+  };
+  auth.onAuthStateChanged(u=>{
+    if(!first){location.reload();return}
+    first=false;
+    A.user=u?{uid:u.uid,name:u.displayName||""}:null;
+    window.__fbName=u&&u.displayName?u.displayName.split(" ")[0]:"";
+    resolveReady(u);
+  });
+
+  // data/users/<uid>/... (claude.ai layout) -> users/<uid>/data/... (Firestore rules layout)
+  const mapPath=p=>p.replace(/^data\/users\/([^/]+)\//,"users/$1/data/");
+  const convE=e=>({code:e&&e.code==="permission-denied"?"invalid_argument":e&&e.code==="resource-exhausted"?"quota_exceeded":"unavailable",message:String((e&&e.message)||e)});
+  const rethrow=e=>{throw convE(e)};
+  const wDoc=s=>({id:s.id,exists:s.exists,data:()=>s.data(),metadata:s.metadata});
+  const wQuery=q=>({docs:q.docs.map(wDoc),size:q.size,empty:q.empty,docChanges:()=>[],metadata:q.metadata});
+  function docRef(r){return{id:r.id,path:r.path,
+    get:()=>r.get().then(wDoc,rethrow),set:d=>r.set(d).catch(rethrow),update:d=>r.update(d).catch(rethrow),delete:()=>r.delete().catch(rethrow),
+    onSnapshot:(n,e)=>r.onSnapshot(s=>n(wDoc(s)),x=>e&&e(convE(x))),collection:c=>collRef(r.collection(c))}}
+  function queryRef(q){return{
+    where:(f,o,v)=>queryRef(q.where(f,o,v)),orderBy:(f,d)=>queryRef(q.orderBy(f,d||"asc")),limit:n=>queryRef(q.limit(n)),
+    get:()=>q.get().then(wQuery,rethrow),onSnapshot:(n,e)=>q.onSnapshot(s=>n(wQuery(s)),x=>e&&e(convE(x)))}}
+  function collRef(c){const b=queryRef(c);b.path=c.path;b.doc=id=>docRef(id?c.doc(id):c.doc());b.add=d=>c.add(d).then(docRef,rethrow);return b}
+  const dbApi={doc:p=>docRef(fs.doc(mapPath(p))),collection:p=>collRef(fs.collection(mapPath(p)))};
+
+  window.claude={use:async name=>{
+    const u=await ready;
+    if(!u)return null;
+    if(name==="db")return dbApi;
+    if(name==="user")return{
+      id:async()=>u.uid,can:async()=>true,isOwner:async()=>false,canEdit:async()=>false,
+      me:async()=>({id:u.uid,name:u.displayName||""}),
+      profiles:async ids=>Object.fromEntries([].concat(ids).map(i=>[i,{id:i,name:i===u.uid?(u.displayName||""):"",isMe:i===u.uid}]))
+    };
+    return null;
+  }};
+})();
+</script>
+
 <style>html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}</style>
 </head>
 <body>
@@ -258,7 +331,7 @@ function playerDoc(){
   const t=today(),wk=weekKey(t);let wn=0,wc=0;
   for(const [d,v] of Object.entries(P.days))if(d>=wk&&d<=t){wn+=v.n;wc+=v.c}
   const recs=Object.values(P.rec);
-  return{nick:String(P.settings.nick||"").slice(0,20),total:recs.length,attempts:recs.reduce((s,r)=>s+r.n,0),correct:recs.reduce((s,r)=>s+r.c,0),
+  return{nick:String(P.settings.nick||window.__fbName||"").slice(0,20),total:recs.length,attempts:recs.reduce((s,r)=>s+r.n,0),correct:recs.reduce((s,r)=>s+r.c,0),
     wk,wn,wc,td:t,tn:(P.days[t]||{}).n||0,streak:streak(),updated:new Date().toISOString()};
 }
 let pushTimer=null,pushing=false,pushAgain=false;
@@ -619,6 +692,15 @@ function sysRow(label,v,total){
   return h("div",{class:"sysrow"},h("span",{},label),h("div",{class:"meter"},h("i",{class:p<60?"lo":p<75?"mid":"hi",style:"width:"+p+"%"})),
     h("span",{class:"num small",style:"text-align:right"},p+"%"+(total?" · "+v.seen+"/"+total:"")));
 }
+// Standalone site only (window.__auth comes from the Firebase shim): prompt to sign in
+function authBanner(){
+  const a=window.__auth;if(!a||a.user)return null;
+  return h("div",{class:"banner"},
+    h("div",{style:"min-width:0;flex:1"},h("b",{},"Google로 로그인하기"),
+      h("div",{class:"small muted"},"기록이 계정에 저장돼 폰·PC에서 이어 풀 수 있고, 친구와 순위표·도전장으로 경쟁할 수 있어요."),
+      a.error?h("div",{class:"small",style:"color:var(--bad)"},a.error):null),
+    h("button",{class:"btn primary",id:"signin",onclick:()=>a.signIn()},"로그인"));
+}
 function resumeBanner(){
   const s=savedSession();if(!s||S.view==="quiz")return null;
   const done=Object.keys(s.picked||{}).length;
@@ -640,6 +722,7 @@ function viewHome(){
     h("div",{class:"top"},
       h("div",{},h("div",{class:"label"},STEP_LABEL[P.settings.step]+" · "+t),h("h1",{},"USMLE 데일리")),
       dd?h("div",{class:"dday"},dd):null),
+    authBanner(),
     resumeBanner(),
     friendsTeaser(),
     h("div",{class:"kpis"},
@@ -776,6 +859,10 @@ function viewDone(){
 }
 function fmtDate(iso){return iso?iso.slice(5,10).replace("-","/"):""}
 function viewFriends(){
+  if(!DB&&window.__auth&&!window.__auth.user)return h("div",{class:"stack"},
+    h("div",{},h("div",{class:"label"},"Friends"),h("h1",{},"친구와 경쟁")),
+    authBanner(),
+    h("p",{class:"small muted",style:"margin:0"},"로그인한 사람끼리 이번 주 순위를 보고, 같은 문제 세트로 도전장을 주고받을 수 있어요. 친구에게 이 사이트 주소를 보내 주세요."));
   if(!DB)return h("div",{class:"stack"},
     h("div",{},h("div",{class:"label"},"Friends"),h("h1",{},"친구와 경쟁")),
     h("div",{class:"panel stack"},
@@ -821,7 +908,11 @@ function viewFriends(){
       h("div",{class:"row"},
         h("input",{type:"text",id:"nick",maxlength:"20",placeholder:S.names[PID]||"이름 또는 별명",value:P.settings.nick||"",style:"flex:1"}),
         h("button",{class:"btn",id:"nick-save",onclick:()=>{const v=document.getElementById("nick").value.trim().slice(0,20);P.settings.nick=v;persist();document.getElementById("nick").blur();render()}},"저장")),
-      h("p",{class:"small muted",style:"margin:0"},"순위표와 도전장에 이 이름이 보여요. 비워 두면 claude.ai 계정 이름을 써요.")),
+      h("p",{class:"small muted",style:"margin:0"},"순위표와 도전장에 이 이름이 보여요. 비워 두면 계정 이름을 써요.")),
+    window.__auth?h("div",{class:"panel stack"},
+      h("h2",{},"친구 초대하는 법"),
+      h("div",{class:"small"},"친구에게 이 사이트 주소(drberrybear.github.io/usmle-daily)를 보내고 Google로 로그인하게 하면 끝이에요."),
+      h("p",{class:"small muted",style:"margin:0"},"각자의 풀이 기록·오답은 서로 보이지 않고, 순위표 숫자와 도전장 점수만 로그인한 사람끼리 공유돼요.")):
     h("div",{class:"panel stack"},
       h("h2",{},"친구 초대하는 법"),
       h("div",{class:"small"},"1. 이 앱 화면의 공유(Share) 메뉴를 열어요."),
@@ -909,7 +1000,13 @@ function viewSettings(){
         h("input",{type:"date",id:"set-exam",value:st.exam||"",onchange:e=>set("exam",e.target.value)}))),
     h("div",{class:"panel stack"},
       h("h2",{},"저장"),
-      h("div",{class:"small"},SYNC==="cloud"?"claude.ai 계정에 저장돼요. 폰과 PC에서 같은 기록을 이어서 볼 수 있어요.":"이 브라우저에만 저장돼요. claude.ai에 로그인해서 열면 계정에 저장돼요."),
+      window.__auth?
+        (window.__auth.user?
+          h("div",{class:"row between"},h("span",{class:"small"},"Google 계정("+(window.__auth.user.name||"로그인됨")+")에 저장돼요. 폰과 PC에서 이어서 풀 수 있어요."),
+            h("button",{class:"btn",id:"signout",onclick:()=>window.__auth.signOut()},"로그아웃")):
+          h("div",{class:"row between"},h("span",{class:"small"},"지금은 이 브라우저에만 저장돼요. 로그인하면 계정에 저장돼요."),
+            h("button",{class:"btn primary",id:"signin2",onclick:()=>window.__auth.signIn()},"Google 로그인"))):
+        h("div",{class:"small"},SYNC==="cloud"?"claude.ai 계정에 저장돼요. 폰과 PC에서 같은 기록을 이어서 볼 수 있어요.":"이 브라우저에만 저장돼요. claude.ai에 로그인해서 열면 계정에 저장돼요."),
       S.confirmReset?h("div",{class:"row"},
         h("span",{class:"small"},"풀이 기록과 표시를 모두 지울까요? AI 문제는 남아요."),
         h("button",{class:"btn danger",id:"reset-yes",onclick:()=>{P=norm({settings:P.settings});S.confirmReset=false;clearSession();persist();render()}},"기록 삭제"),
